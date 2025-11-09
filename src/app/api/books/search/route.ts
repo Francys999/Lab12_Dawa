@@ -1,9 +1,5 @@
-// src/app/api/books/search/route.ts
 import { NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
-
-const ALLOWED_SORT_FIELDS = ['title', 'publishedYear', 'createdAt'] as const
-type SortField = (typeof ALLOWED_SORT_FIELDS)[number]
 
 export async function GET(request: Request) {
   try {
@@ -13,81 +9,112 @@ export async function GET(request: Request) {
     const genre = searchParams.get('genre') || ''
     const authorName = searchParams.get('authorName') || ''
 
-    const page = Math.max(parseInt(searchParams.get('page') || '1', 10), 1)
+    const page = parseInt(searchParams.get('page') || '1', 10)
+    const limitRaw = parseInt(searchParams.get('limit') || '10', 10)
+    const sortByParam = searchParams.get('sortBy') || 'createdAt'
+    const orderParam = searchParams.get('order') || 'desc'
 
-    let limit = parseInt(searchParams.get('limit') || '10', 10)
-    if (isNaN(limit) || limit <= 0) limit = 10
-    if (limit > 50) limit = 50
+    // Validar página y límite
+    const currentPage = page > 0 ? page : 1
+    const limit =
+      limitRaw > 0
+        ? limitRaw > 50
+          ? 50
+          : limitRaw
+        : 10
 
-    const sortByParam = (searchParams.get('sortBy') || 'createdAt') as SortField
-    const sortBy: SortField = ALLOWED_SORT_FIELDS.includes(sortByParam)
-      ? sortByParam
+    // Campos permitidos para ordenar
+    const allowedSortFields = [
+      'title',
+      'publishedYear',
+      'createdAt',
+    ] as const
+    type SortField = (typeof allowedSortFields)[number]
+
+    const sortBy: SortField = allowedSortFields.includes(
+      sortByParam as SortField
+    )
+      ? (sortByParam as SortField)
       : 'createdAt'
 
-    const orderParam = (searchParams.get('order') || 'desc').toLowerCase()
     const order: 'asc' | 'desc' =
-      orderParam === 'asc' || orderParam === 'desc' ? orderParam : 'desc'
+      orderParam === 'asc' ? 'asc' : 'desc'
 
-    const where = {
-      AND: [
-        search
-          ? {
-              title: {
-                contains: search,
-                mode: 'insensitive',
-              },
-            }
-          : {},
-        genre ? { genre } : {},
-        authorName
-          ? {
-              author: {
-                name: {
-                  contains: authorName,
-                  mode: 'insensitive',
-                },
-              },
-            }
-          : {},
-      ],
+    const skip = (currentPage - 1) * limit
+
+    // Construir filtros dinámicos (usamos any para evitar choque estricto de tipos en build)
+    const AND: any[] = []
+
+    if (search) {
+      AND.push({
+        title: {
+          contains: search,
+          mode: 'insensitive' as const,
+        },
+      })
     }
 
-    const total = await prisma.book.count({ where })
+    if (genre) {
+      AND.push({
+        genre: genre,
+      })
+    }
 
-    const books = await prisma.book.findMany({
-      where,
-      include: {
+    if (authorName) {
+      AND.push({
         author: {
-          select: {
-            id: true,
-            name: true,
+          name: {
+            contains: authorName,
+            mode: 'insensitive' as const,
           },
         },
-      },
-      orderBy: {
-        [sortBy]: order,
-      },
-      skip: (page - 1) * limit,
-      take: limit,
-    })
+      })
+    }
 
-    const totalPages = total > 0 ? Math.ceil(total / limit) : 0
+    const where: any = {}
+    if (AND.length > 0) {
+      where.AND = AND
+    }
+
+    // Consultas: total + datos paginados
+    const [total, books] = await Promise.all([
+      prisma.book.count({ where }),
+      prisma.book.findMany({
+        where,
+        include: {
+          author: true,
+        },
+        orderBy: {
+          [sortBy]: order,
+        },
+        skip,
+        take: limit,
+      }),
+    ])
+
+    const totalPages =
+      total === 0
+        ? 1
+        : Math.ceil(total / limit)
 
     return NextResponse.json({
       data: books,
       pagination: {
-        page,
+        page: currentPage,
         limit,
         total,
         totalPages,
-        hasNext: page < totalPages,
-        hasPrev: page > 1 && totalPages > 0,
+        hasNext: currentPage < totalPages,
+        hasPrev: currentPage > 1,
       },
     })
   } catch (error) {
-    console.error(error)
+    console.error('Error en /api/books/search', error)
     return NextResponse.json(
-      { error: 'Error en la búsqueda de libros' },
+      {
+        error:
+          'Error al buscar libros',
+      },
       { status: 500 }
     )
   }
